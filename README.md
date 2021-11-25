@@ -79,7 +79,9 @@
 2021/11/24 20:27:01 ---- writeConsistency:
 ......
 2021/11/24 20:28:41 ---- Spent 99.600205063 seconds to insert 10000000 records, speed: 100401.39971272861 Rows/Second
-➜  influxdb vi write.sh
+```
+
+```
 ➜  influxdb ./write.sh
 2021/11/24 20:29:24 write data
 2021/11/24 20:29:24 ---- writeClients: 8
