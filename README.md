@@ -7,7 +7,7 @@
 - `b1.8.3` (默认分支)
 	最早开始做的存储引擎改造：乱序表、层间拷贝、消除compaction带来的写停顿。后面又将 L2 TSM 发送到 storage pool 的存储节点上。
 - `b1.8.3_p1_no_writestall`
-	这是从默认分支上剥离出来的，只包括存储引擎改造部分。
+	这是从默认分支上剥离出来的，只包括存储引擎改造部分。**论文中“单机存储引擎的性能测试”就是以这部分代码进行的**。后期我进行了优化，利用`sync.Map`实现`seriesKey2Min/MaxTime`，也只是做在了这个分支上。
 - `b1.8.3_p2_btreeindex`
 	在`b1.8.3_p1_no_writestall`基础上的改造。在与华为初期的讨论中我了解到高基数问题，进行了相关调研后我把 series index 的实现由 hashmap 改为 btree，实验证明这并不能带来性能提升。
 
@@ -20,6 +20,8 @@
 在[distributed-influxdb](https://gitee.com/l-iberty/distributed-influxdb)的基础上，把之前对存储引擎的改造，以及发送 L2 TSM 到 storage pool 的代码迁移过来。
 
 #### 4. [https://gitee.com/l-iberty/distributed-influxdb3](https://gitee.com/l-iberty/distributed-influxdb3) `master`分支(默认)
+
+**这是最终用在整个分布式系统里的版本**。
 
 在[distribuetd-influxdb2](https://gitee.com/l-iberty/distributed-influxdb2)基础上，采用 raft 实现 data nodes 的强一致性（只实现了写操作的强一致性保证，读操作不走 raft 流程）。读操作分为本地读取和远端读取(“远端”指的是 storage pool 里的镜像)，实现时参考了[distributed-influxdb](https://gitee.com/l-iberty/distributed-influxdb)的方案。
 
@@ -35,7 +37,7 @@
 
 参考：[InfluxDB集群化方案之influx-proxy的说明](https://sun-iot.gitee.io/posts/2755494b)
 
-每个 circle 存储一份全量数据，所以为了实现“分库分表”，也就是根据 db 和 measurement 把数据打到不同的 influxdb raft group，需要把多个 group 里的 influxdb 实例全部配置在一个 circle 里面。
+**我对 influx-proxy 进行了修改，使其满足我的需求，详见论文**。
 
 存在的问题：influx-proxy 在把接收到的有序数据转发给 influxdb 实例时，会产生少量的紊乱。如果 influx-proxy 连接到我们改造后的 influxdb 上就会发生少量乱序数据被丢弃的现象。
 
@@ -50,6 +52,9 @@
 3. InfluxDB 镜像：[https://gitee.com/l-iberty/influxdb-storage-mirror](https://gitee.com/l-iberty/influxdb-storage-mirror)
 
 ## 部署
+
+(这是早期绘制的一个草图，测试时可按需添加 StoreNode )
+
 在未引入 influx-proxy 时使用的本地的3台虚拟机，仅支持一个3副本的 influxdb raft 集群。引入 influx-proxy 后机器性能会变得非常不稳定，时常因为 out of memory 而崩溃。
 
 为了在较稳定的环境下测试，我把上面的全部组件打包到了实验室的主机上运行。配置如下：
@@ -67,7 +72,7 @@
 
 完整的测试包：[https://gitee.com/l-iberty/distributed_influxdb_test_pkg](https://gitee.com/l-iberty/distributed_influxdb_test_pkg)
 
-### Test Case 1: 5000万条记录，无任何节点宕机
+### Testcase 1: 5000万条记录，无任何节点宕机
 
 参数设置：
 
@@ -206,7 +211,7 @@ numPoints=$((numOfFiles * rowsPerFile))
 === PASS
 ```
 
-### Test Case 2: 5000万条记录，4 个 StoreNode 宕机
+### Testcase 2: 5000万条记录，4 个 StoreNode 宕机
 
 参数设置：
 
@@ -384,7 +389,7 @@ killing influxd 5: 274036
 
 **一个小问题**：data nodes 有时会报一个异常，来自`(*ClusterMetaClient).syncLoop`同步元数据的操作：`index X < local index Y`。这个异常无关紧要，但我想出现这个异常的时候是否需要设置`needSync = true`？异常的本质是本地数据可能比 meta nodes 更新，所以是否需要把本地数据退回和 meta nodes 一致的版本？
 
-### Test Case 3: 5000万条记录，6 个 StoreNode 宕机
+### Testcase 3: 5000万条记录，6 个 StoreNode 宕机
 
 参数设置：
 
@@ -578,7 +583,7 @@ killing influxd 2: 840330
 
 查出来的数据比预期少是因为网络压力过大造成乱序数据被丢弃，但是比预期的多是为什么？
 
-### Test Case 4: 1000万条记录，6 个 StoreNode 宕机
+### Testcase 4: 1000万条记录，6 个 StoreNode 宕机
 
 另外修改每个 data node 的配置：L1 TSM 满 1 个就刷到 L2
 
@@ -789,4 +794,58 @@ killing influxd 8: 1048228
 ./test.sh: line 7: kill: (1048230) - No such process
 ./test.sh: line 7: kill: (1048231) - No such process
 ./test.sh: line 7: kill: (1048232) - No such process
+```
+
+### Testcase 5: 5000万条记录，6 个 StoreNode 宕机，master、meta nodes 和 data nodes 集群各有一个节点宕机
+
+```
+*** starting meta nodes
+*** starting data nodes
+*** starting proxy
+*** starting masters
+*** starting slaves
+*** starting influxdb mirrors
+*** starting write test
+
+*** crash some masters
+killing master 2934583
+
+*** crash some meta nodes
+killing meta node 2933337
+
+*** crash some data nodes
+killing data node (group 1) 2933744
+killing data node (group 2) 2934467
+
+=== writing to mydb
+......
+2022/01/11 22:01:27 ---- Spent 3405.027112932 seconds to insert 50000000 records, speed: 14684.170886658818 Rows/Second
+
+=== writing to testdb
+2022/01/11 22:58:36 ---- Spent 3428.971608898 seconds to insert 50000000 records, speed: 14581.631376081577 Rows/Second
+
+*** starting query test
+
+*** crash some store nodes
+killing slave 4: 2934635
+killing influxd 4: 2934764
+......
+killing slave 2: 2934618
+killing influxd 2: 2934762
+......
+killing slave 9: 2934678
+killing influxd 9: 2934774
+......
+killing slave 7: 2934665
+killing influxd 7: 2934767
+......
+
+=== query from mydb
+{"results":[{"statement_id":0,"series":[{"name":"devices","columns":["time","count_humidity","count_temperature"], "values":[["1970-01-01T00:00:00Z",49998732,49998732]]}]}]}
+=== WARNING: points got 49998732, expected 50000000
+
+=== query from testdb
+100   173  100   173    0     0    335      0 --:--:-- --:--:-- --:--:--   335
+{"results":[{"statement_id":0,"series":[{"name":"devices","columns":["time","count_humidity","count_temperature"], "values":[["1970-01-01T00:00:00Z",50000000,50000000]]}]}]}
+=== PASS
 ```
